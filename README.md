@@ -16,23 +16,23 @@ The result: a per-sample throughput **~36× faster than PennyLane lightning.qubi
 
 | File | Purpose |
 |---|---|
-| `gate_fusion.py` | Gate matrix builders (RX/RY/RZ/Rot/PhaseShift, X/Y/Z/H/S/T, CRX/CRY/CRZ/CPhase/IsingXX/YY/ZZ, CNOT/CY/CZ/SWAP/ISWAP, Toffoli, CSWAP) + fused layer-apply functions + edge coloring with commutation predicates |
-| `torch_sim_real.py` | Raw per-gate kernels in `(B, 2, 2, ..., 2)` state layout, plus state-utility helpers, block-encoding subroutines, and the Hadamard-test overlap primitive |
+| `fastqml/gate_fusion.py` | Gate matrix builders (RX/RY/RZ/Rot/PhaseShift, X/Y/Z/H/S/T, CRX/CRY/CRZ/CPhase/IsingXX/YY/ZZ, CNOT/CY/CZ/SWAP/ISWAP, Toffoli, CSWAP) + fused layer-apply functions + edge coloring with commutation predicates |
+| `fastqml/torch_sim_real.py` | Raw per-gate kernels in `(B, 2, 2, ..., 2)` state layout, plus state-utility helpers, block-encoding subroutines, and the Hadamard-test overlap primitive |
 | `examples/minimal_cuda_graph_model.py` | A small variational-quantum-circuit-style `nn.Module`, plus benchmarks for CPU eager / CPU `torch.compile` / CUDA eager / CUDA graph / PennyLane `lightning.qubit` |
 | `test_pennylane_equivalence.py` | 32 numerical equivalence tests against PennyLane `default.qubit` covering every gate, plus multi-pair colors, chain ordering, and per-batch chains. Every test must pass at fp64 noise floor (max diff = 0 or ~1e-17) |
 
 ### Which module should I use?
 
-In almost all training / inference workloads, **use `gate_fusion.py` first**. It's the fast path — every common gate is exposed as a layer-fusing builder + apply pair, and the kron-product + matmul pattern is what makes the CUDA-graph + per-sample throughput numbers in the benchmark below work. If you're building an `nn.Module`, building a VQC, or anything that runs many gates on many qubits per forward, this is the right tool.
+In almost all training / inference workloads, **use `fastqml.gate_fusion` first**. It's the fast path — every common gate is exposed as a layer-fusing builder + apply pair, and the kron-product + matmul pattern is what makes the CUDA-graph + per-sample throughput numbers in the benchmark below work. If you're building an `nn.Module`, building a VQC, or anything that runs many gates on many qubits per forward, this is the right tool.
 
-**Reach for `torch_sim_real.py`** when one of these applies:
+**Reach for `fastqml.torch_sim_real`** when one of these applies:
 
 - **One-off single-gate ops.** Building a full `(nq, 2, 2)` gate stack to use `apply_su2_layer` for a single non-identity gate is wasteful. `apply_ry(re, im, theta, qubit, nq)` etc. apply one gate directly via `movedim` + stack ops — fewer launches when the work isn't layer-shaped.
 - **State / amplitude / probability conversion.** `_amp_to_state_real(amp, nq)` initializes the `(B, 2, 2, ..., 2)` state from an amplitude vector. `_state_to_probs_real(re, im)` flattens `|ψ|²` to a probability vector. `_renormalize_real(re, im, nq)` re-normalizes after non-unitary operations. `gate_fusion` deliberately doesn't ship these — they aren't gates.
 - **Block-encoded operators.** `apply_block_encoding_real(amp, ry_layers, cry_anchor, cry_data, ry_final, nq)` and `apply_block_encoding_complex(...)` post-select an ancilla qubit to encode a learnable sub-norm-1 linear operator. Useful for quantum LCU-style circuits or learned non-unitary maps.
 - **Hadamard test for overlaps.** `hadamard_test_overlap(re_Q, im_Q, re_K, im_K, nq)` returns `Re<ψ_Q | ψ_K>` via the standard 1-ancilla Hadamard-test circuit — useful whenever you need a differentiable estimate of an inner product between two state vectors.
 
-If you're just doing standard parametric circuits with rotations and entanglers, you only need `gate_fusion.py`. For more exotic QML primitives (LCU, overlap-based losses, hybrid amplitude/probability workflows), you'll want both.
+If you're just doing standard parametric circuits with rotations and entanglers, you only need `fastqml.gate_fusion`. For more exotic QML primitives (LCU, overlap-based losses, hybrid amplitude/probability workflows), you'll want both.
 
 ---
 
@@ -46,15 +46,25 @@ For NVIDIA GPUs (Windows/Linux), pin a CUDA-matched PyTorch wheel first:
 pip install torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
-(Use `cu124` / `cu121` / etc. for older CUDA toolkits, or skip this and let `pip install -r requirements.txt` pull the default wheel for CPU / Apple silicon.)
+(Use `cu124` / `cu121` / etc. for older CUDA toolkits, or skip this and let `pip install fastqml` pull the default wheel for CPU / Apple silicon.)
 
-Then the rest:
+Then install fastqml:
 
 ```bash
-pip install -r requirements.txt
+pip install fastqml                  # once published to PyPI
+# or directly from GitHub for the latest:
+pip install git+https://github.com/ereinha/fastQML.git
 ```
 
-This pulls torch, numpy, and PennyLane + lightning. The PennyLane deps are only required for `test_pennylane_equivalence.py` and the PennyLane row in the example benchmark; the core toolkit (`gate_fusion.py` + `torch_sim_real.py`) is torch + numpy only.
+For editable / contributor install:
+
+```bash
+git clone https://github.com/ereinha/fastQML.git && cd fastQML
+pip install -e .          # core
+pip install -e .[test]    # also install pennylane + pennylane-lightning for the equivalence tests
+```
+
+The core toolkit (`fastqml.gate_fusion` + `fastqml.torch_sim_real`) needs only torch + numpy. PennyLane is an optional dep used for `test_pennylane_equivalence.py` and the PennyLane row in the example benchmark.
 
 > **Note:** Triton is *not* a dependency here. The shipped fast path uses CUDA graphs (`torch.cuda.make_graphed_callables`), which capture raw CUDA kernel launches and do no codegen. You would only need Triton if you chose to use `torch.compile(model)` on the GPU path instead (which is slower than CUDA graphs for this workload — see the benchmark). On Linux/macOS Triton ships transitively with `torch`; on Windows you'd `pip install triton-windows`.
 
@@ -102,7 +112,7 @@ If `cl.exe` isn't found at run-time the example's CPU compile path gracefully sk
 
 ```python
 import torch
-import gate_fusion as gf
+from fastqml import gate_fusion as gf
 
 device, dtype = torch.device("cuda"), torch.float32
 nq, B = 6, 32
@@ -142,7 +152,7 @@ G_re, G_im = gf.build_toffoli_8x8(1, device, dtype)
 state_re, state_im = gf.apply_disjoint_three_qubit_layer(state_re, state_im, plans[0], G_re, G_im)
 ```
 
-The full list of builders and apply functions is in `gate_fusion.py`. They all return `(re, im)` real/imaginary pairs and operate on state tensors with shape `(B, 2, 2, ..., 2)` where axis 1 is qubit 0 (MSB of the flat basis index).
+The full list of builders and apply functions is in `fastqml.gate_fusion`. They all return `(re, im)` real/imaginary pairs and operate on state tensors with shape `(B, 2, 2, ..., 2)` where axis 1 is qubit 0 (MSB of the flat basis index).
 
 ### Use it inside an `nn.Module` for training
 
@@ -286,4 +296,4 @@ MIT — see [`LICENSE`](LICENSE).
 - **Per-batch unitaries don't fuse.** When a layer's gate angles depend on per-batch quantities (e.g. data re-uploading), the full `(B, 2^nq, 2^nq)` per-batch unitary is too large to materialize for `nq=10` (256 MB at B=64, fp32). `apply_per_batch_su2_chain` falls back to a sequential per-qubit batched matmul — still fast in CUDA graph mode but not as fast as the static-unitary path.
 - **CUDA graphs and torch.compile are mutually exclusive in this code.** Both want to own graph capture; trying to combine breaks. Use one or the other.
 - **Windows CPU `torch.compile` needs MSVC.** Install Visual Studio Build Tools' C++ workload, then run from a Developer Command Prompt (or `vcvars64.bat`-load the env). Linux/macOS work with their default `gcc`/`clang`.
-- **Inductor's auto-CUDA-graph (`reduce-overhead` mode) is disabled** in `gate_fusion.py` (`torch._inductor.config.triton.cudagraphs = False`) to avoid fighting an outer `make_graphed_callables`. If you use Inductor's auto-graphs instead, comment that out.
+- **Inductor's auto-CUDA-graph (`reduce-overhead` mode) is disabled** in `fastqml.gate_fusion` (`torch._inductor.config.triton.cudagraphs = False`) to avoid fighting an outer `make_graphed_callables`. If you use Inductor's auto-graphs instead, comment that out.

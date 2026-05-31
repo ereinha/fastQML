@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastqml"
+version = "0.1.0"
+description = "Fast PyTorch quantum-circuit primitives via Kronecker-product layer fusion and edge coloring"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Eric A. F. Reinhardt" },
+]
+keywords = ["quantum-computing", "quantum-machine-learning", "pytorch", "gate-fusion", "cuda-graphs"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.6,<3.0",
+    "numpy>=1.24,<3.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pennylane>=0.40,<1.0",
+    "pennylane-lightning>=0.40,<1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ereinha/fastQML"
+Repository = "https://github.com/ereinha/fastQML"
+Issues = "https://github.com/ereinha/fastQML/issues"
+
+[tool.setuptools.packages.find]
+include = ["fastqml*"]
+exclude = ["examples*", "tests*"]

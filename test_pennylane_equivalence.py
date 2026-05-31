@@ -2,7 +2,7 @@ import torch
 import pennylane as qml
 import numpy as np
 
-import gate_fusion as gf
+from fastqml import gate_fusion as gf
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
