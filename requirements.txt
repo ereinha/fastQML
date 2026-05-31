@@ -1,0 +1,5 @@
+torch>=2.6,<3.0
+numpy>=1.24,<3.0
+
+pennylane>=0.40,<1.0
+pennylane-lightning>=0.40,<1.0

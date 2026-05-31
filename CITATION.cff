@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use fastQML in academic work, please cite it as below."
+type: software
+authors:
+  - family-names: Reinhardt
+    given-names: "Eric A. F."
+    orcid: "https://orcid.org/0000-0003-2128-4025"
+title: "fastQML: Fast PyTorch quantum-circuit primitives via Kronecker-product layer fusion"
+version: "0.1.0"
+date-released: 2026-05-30
+url: "https://github.com/ereinha/fastQML"
+license: MIT
+keywords:
+  - quantum-computing
+  - quantum-machine-learning
+  - pytorch
+  - gate-fusion
+  - cuda-graphs
