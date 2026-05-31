@@ -140,7 +140,6 @@ def build_ry_rx_per_batch(ry_angles, rx_angles):
     return G_re, G_im
 
 
-@torch.compile(fullgraph=True, dynamic=False)
 def apply_su2_layer(re: torch.Tensor, im: torch.Tensor,
                     G_re: torch.Tensor, G_im: torch.Tensor):
     B = re.shape[0]
@@ -159,7 +158,6 @@ def apply_su2_layer(re: torch.Tensor, im: torch.Tensor,
     return new_re.reshape(re.shape), new_im.reshape(im.shape)
 
 
-@torch.compile(fullgraph=True, dynamic=False)
 def apply_per_batch_su2_chain(re, im, G_re, G_im):
     nq = G_re.shape[1]
     for q in range(nq):
