@@ -19,6 +19,10 @@ The result: a per-sample throughput **~36× faster than PennyLane lightning.qubi
 | `fastqml/gate_fusion.py` | Gate matrix builders (RX/RY/RZ/Rot/PhaseShift, X/Y/Z/H/S/T, CRX/CRY/CRZ/CPhase/IsingXX/YY/ZZ, CNOT/CY/CZ/SWAP/ISWAP, Toffoli, CSWAP) + fused layer-apply functions + edge coloring with commutation predicates |
 | `fastqml/torch_sim_real.py` | Raw per-gate kernels in `(B, 2, 2, ..., 2)` state layout, plus state-utility helpers, block-encoding subroutines, and the Hadamard-test overlap primitive |
 | `examples/minimal_cuda_graph_model.py` | A small variational-quantum-circuit-style `nn.Module`, plus benchmarks for CPU eager / CPU `torch.compile` / CUDA eager / CUDA graph / PennyLane `lightning.qubit` |
+| `fastqml/register_ops.py` | Multiplexed (address-controlled) rotations for single large registers — angle indexed by computational-basis address bits — with optional Triton kernels (autograd included), pure-torch fallback, and dense composition helpers (`compose_dense` / `apply_dense`) |
+| `fastqml/circulant.py` | Translation-equivariant circulant layers for lattice registers: momentum-block operators `M = F' (sum_k U(k)) F` as dense matrices or FFT-style applies |
+| `examples/register_ops_bench.py` | Benchmarks for the multiplexer (Triton / eager / per-batch chain), circulant applies, and dense composition |
+| `test_register_ops.py` | 15 numerical tests: multiplexers vs explicit dense references at fp64, Triton forward/backward vs eager autograd, circulant unitarity / dense-vs-k-space equality / translation equivariance |
 | `test_pennylane_equivalence.py` | 32 numerical equivalence tests against PennyLane `default.qubit` covering every gate, plus multi-pair colors, chain ordering, and per-batch chains. Every test must pass at fp64 noise floor (max diff = 0 or ~1e-17) |
 
 ### Which module should I use?
@@ -33,6 +37,8 @@ In almost all training / inference workloads, **use `fastqml.gate_fusion` first*
 - **Hadamard test for overlaps.** `hadamard_test_overlap(re_Q, im_Q, re_K, im_K, nq)` returns `Re<ψ_Q | ψ_K>` via the standard 1-ancilla Hadamard-test circuit — useful whenever you need a differentiable estimate of an inner product between two state vectors.
 
 If you're just doing standard parametric circuits with rotations and entanglers, you only need `fastqml.gate_fusion`. For more exotic QML primitives (LCU, overlap-based losses, hybrid amplitude/probability workflows), you'll want both.
+
+**Reach for `fastqml.register_ops` / `fastqml.circulant`** when your model is a *single large register* rather than many small ones — e.g. a lattice register where sites are basis states. The regime rule: many small registers are launch-bound (gate_fusion + CUDA graphs is the fast path); one big register is bandwidth-bound, and the fast path is minimizing passes over the state. `register_ops` provides the multiplexed rotation (angle indexed by basis-address bits — the uniformly controlled rotation of circuit synthesis), which per-batch gate primitives cannot express without a batch-fold that costs ~150x (see benchmark). `circulant` provides translation-equivariant lattice layers; combined with `compose_dense` for parameters that are static across many evaluations, whole gate cascades collapse to one matmul per block.
 
 ---
 
@@ -66,7 +72,7 @@ pip install -e .[test]    # also install pennylane + pennylane-lightning for the
 
 The core toolkit (`fastqml.gate_fusion` + `fastqml.torch_sim_real`) needs only torch + numpy. PennyLane is an optional dep used for `test_pennylane_equivalence.py` and the PennyLane row in the example benchmark.
 
-> **Note:** Triton is *not* a dependency here. The shipped fast path uses CUDA graphs (`torch.cuda.make_graphed_callables`), which capture raw CUDA kernel launches and do no codegen. You would only need Triton if you chose to use `torch.compile(model)` on the GPU path instead (which is slower than CUDA graphs for this workload — see the benchmark). On Linux/macOS Triton ships transitively with `torch`; on Windows you'd `pip install triton-windows`.
+> **Note:** Triton is *not* a dependency. The gate_fusion fast path uses CUDA graphs (`torch.cuda.make_graphed_callables`), which capture raw CUDA kernel launches and do no codegen. `fastqml.register_ops` will use Triton kernels for its multiplexed rotations when Triton is importable (~4x over its pure-torch fallback) and falls back to pure torch otherwise. On Linux/macOS Triton ships transitively with `torch`; on Windows `pip install triton-windows`.
 
 ### C++ compiler (only needed for `torch.compile` on CPU)
 
@@ -191,7 +197,15 @@ System: Windows 11, NVIDIA RTX 5090, CPU compile via MSVC 14.44.
 === PennyLane lightning.qubit (C++ backend) ===
   per-circuit eval (B=1):      1.63 ms/call
   batch of 32 sequential:     52.33 ms     (1.64 ms/sample)
+
+=== TorchQuantum 0.3.0 (CUDA eager, batched) ===
+  forward (no_grad):           13.22 ms/call  (0.41 ms/sample)
+  training step (fwd+bwd+opt): 37.44 ms/step
+  torch.compile:               fails (InductorError: complex-dtype states)
+  cuda-graph capture:          fails (gate matrices built dynamically per call)
 ```
+
+The TorchQuantum run is the identical circuit (cross-checked to 2.5e-10 on output probabilities, `examples/torchquantum_bench.py`). Its batched eager forward beats our eager path; the gap opens at the fast paths, neither of which TorchQuantum can enter — CUDA-graph capture fails on its dynamic gate construction, and `torch.compile` fails on its complex-dtype states (the two constraints the compile-safe `(re, im)` design of this toolkit exists to satisfy).
 
 ### Per-sample throughput
 
@@ -202,16 +216,49 @@ Our forward times divided by `B=32` for direct comparison with PennyLane's per-s
 | PennyLane `lightning.qubit` (C++) | 1.64 | 1.0× |
 | toolkit CPU eager | 0.91 | 1.8× faster |
 | toolkit CPU `torch.compile` | 0.21 | **7.7× faster** |
+| TorchQuantum (CUDA eager, batched) | 0.41 | 4.0× faster |
 | toolkit CUDA eager | 0.58 | 2.8× faster |
 | toolkit CUDA graphs | 0.046 | **35.6× faster** |
 
 The gap comes from gate_fusion processing `B` samples as one batched matmul; PennyLane's lightning evaluates one circuit per sample.
 
+### Register-ops benchmark
+
+`examples/register_ops_bench.py`, RTX 5090, fp32, TF32 off.
+
+Multiplexed RyRz (`B=8192`, `nq=8`, 64 select values), three routes to the identical op:
+
+| Route | ms/call |
+|---|---:|
+| pure-torch fallback + `torch.compile` | 0.024 |
+| `register_ops` Triton (in-place) | 0.109 |
+| `register_ops` pure-torch fallback | 0.375 |
+| batch-fold + `apply_per_batch_su2_chain` | 10.80 |
+
+In an eager loop, the compiled fallback is fastest (Inductor fuses trig + rotation + stacking into fewer kernels than the hand-written Triton path launches). Inside an outer CUDA graph the ordering flips: capture removes launch overhead for every route, and the in-place Triton kernel's single zero-copy pass wins. Compile and graphs are mutually exclusive here (see Limitations), so pick per context.
+
+The per-batch-chain route is the only way to express address-indexed angles with gate_fusion primitives; the ~160x gap is permute/copy traffic plus half-a-million tiny batched matmuls, and is the reason the multiplexer exists as its own kernel.
+
+Circulant block apply (`A=4` ancilla channels):
+
+| Lattice | dim | B | dense (4 GEMMs) | k-space | k-space + `torch.compile` |
+|---|---:|---:|---:|---:|---:|
+| 8x8 | 256 | 8192 | 0.142 ms | 0.831 ms | 0.460 ms |
+| 16x16 | 1024 | 1024 | 0.238 ms | 0.858 ms | 0.358 ms |
+
+Dense wins at both sizes on this hardware — the k-space route has ~10x fewer FLOPs but loses to launch/bandwidth overhead at these dims; it is kept for larger registers.
+
+`compose_dense` (8 fixed layers, `nq=8`, `B=8192`): sequential applies 0.874 ms vs composed-once single apply 0.140 ms (**6.2x**) — when parameters are static across many evaluations, compose once and amortize.
+
 ### Reproducing
 
 ```bash
 .venv/Scripts/python.exe examples/minimal_cuda_graph_model.py
+.venv/Scripts/python.exe examples/register_ops_bench.py
+.venv/Scripts/python.exe examples/torchquantum_bench.py
 ```
+
+The TorchQuantum comparison needs `pip install git+https://github.com/mit-han-lab/torchquantum.git --no-deps` plus `opt_einsum qiskit qiskit-ibm-runtime qiskit-aer torchpack torchdiffeq pathos` (the PyPI torchquantum release is pinned to removed qiskit APIs).
 
 On Linux/macOS, `torch.compile`'s CPU backend picks up `gcc`/`clang` automatically. On Windows, run from a Visual Studio Developer Command Prompt (or call `vcvars64.bat`) so `cl.exe` is on `PATH`; otherwise the CPU compile path gracefully skips with the error.
 
@@ -248,6 +295,34 @@ Output (32 tests, all at fp64 noise floor):
   OK  apply_per_batch_su2_chain (B=4, nq=5): all batches match
 ```
 
+### Register-ops tests
+
+```bash
+.venv/Scripts/python.exe test_register_ops.py
+```
+
+Output (15 tests; multiplexers checked against explicit fp64 dense references, Triton backward against eager autograd):
+
+```
+=== register_ops: multiplexed rotations ===
+  OK  mux_ry_rz vs dense reference (nq=5, t=1, S=4)        max |diff| = 2.4e-07
+  OK  mux_ry_rz in-place == out-of-place                   max |diff| = 2.4e-07
+  OK  mux_ry vs dense reference (nq=5, t=1, S=4)           max |diff| = 1.6e-07
+  OK  mux_ry in-place == out-of-place                      max |diff| = 2.4e-07
+  OK  mux_ry_rz vs dense reference (nq=8, t=0, S=64)       max |diff| = 3.3e-07
+  OK  mux_ry_rz in-place == out-of-place                   max |diff| = 3.6e-07
+  OK  triton fwd == eager fwd (nq=8, S=64)                 max |diff| = 4.8e-07
+  OK  mux_ry_rz autograd d_re/d_im/d_ty/d_tz (triton bwd vs eager autograd)  max |diff| = 7.2e-07
+=== register_ops: dense composition ===
+  OK  compose_dense == sequential apply_dense              max |diff| = 7.2e-07
+=== circulant ===
+  OK  circulant_dense unitary for unitary U(k) (L=4x4, A=4) max |diff| = 3.2e-08
+  OK  circulant dense apply == k-space apply               max |diff| = 7.2e-07
+  OK  circulant commutes with lattice translations         max |diff| = 7.2e-07
+
+15/15 passed
+```
+
 ---
 
 ## Conventions
@@ -259,6 +334,8 @@ Output (32 tests, all at fp64 noise floor):
 **Two-qubit basis.** `(c, t)` with `c` as MSB, so the 4-state basis order is `|c=0,t=0>, |c=0,t=1>, |c=1,t=0>, |c=1,t=1>`. For CRY/CRX/CRZ the matrix is identity on `|c=0>...`, the rotation on `|c=1>...`.
 
 **Three-qubit basis.** `(q1, q2, q3)` with `q1` as MSB; the 8-state basis order matches.
+
+**register_ops layout.** Multiplexer state is flat `(B, 2^nq)` with qubit 0 as MSB. `apply_mux_ry(re, im, angles, target, nq, select_bits)`: angles have shape `(B, 2^select_bits)` and are indexed by the lowest `select_bits` bits of the basis address; the select bits must lie below the target qubit (other layouts reduce to this by a basis permutation). In-place variants (`apply_mux_ry_`, `apply_mux_ry_rz_`) skip autograd for sampling-style loops. `circulant` register index is `a * N + site` with sites row-major on the `L1 x L2` torus; momentum blocks `Uk` have shape `(L1, L2, A, A)`.
 
 **Commutation predicates.** Used by the edge-coloring algorithms to decide when reordering across colors is safe.
 - `cry_commute(e1, e2)` — CRX/CRY/CRZ family: don't commute when one's target is the other's control
@@ -285,6 +362,8 @@ If you use fastQML in published research, please cite it:
 }
 ```
 
+The multiplexed rotation is the uniformly controlled rotation of quantum-circuit synthesis (Mottonen, Vartiainen, Bergholm & Salomaa, PRL 93, 130502, 2004; Shende, Bullock & Markov, IEEE TCAD 25, 1000, 2006). The optional Triton kernels use Triton (Tillet, Kung & Cox, MAPL 2019). Gate fusion in statevector simulation follows the lineage of qHiPSTER (Smelyanskiy et al., arXiv:1601.07195) and Haner & Steiger (SC'17, arXiv:1704.01127); the equivalence tests and benchmarks use PennyLane (Bergholm et al., arXiv:1811.04968) and TorchQuantum (Wang et al., HPCA 2022, arXiv:2107.10845).
+
 A machine-readable [`CITATION.cff`](CITATION.cff) is also included — GitHub renders a "Cite this repository" button on the repo page that copies the citation in BibTeX, APA, or other formats.
 
 ## License
@@ -293,7 +372,7 @@ MIT — see [`LICENSE`](LICENSE).
 
 ## Limitations
 
-- **Per-batch unitaries don't fuse.** When a layer's gate angles depend on per-batch quantities (e.g. data re-uploading), the full `(B, 2^nq, 2^nq)` per-batch unitary is too large to materialize for `nq=10` (256 MB at B=64, fp32). `apply_per_batch_su2_chain` falls back to a sequential per-qubit batched matmul — still fast in CUDA graph mode but not as fast as the static-unitary path.
+- **Per-batch unitaries don't fuse.** When a layer's gate angles depend on per-batch quantities (e.g. data re-uploading), the full `(B, 2^nq, 2^nq)` per-batch unitary is too large to materialize for `nq=10` (256 MB at B=64, fp32). `apply_per_batch_su2_chain` falls back to a sequential per-qubit batched matmul — still fast in CUDA graph mode but not as fast as the static-unitary path. When the data-dependent angle is indexed by basis-address bits rather than free per batch element, use `register_ops.apply_mux_ry` / `apply_mux_ry_rz` instead (see the register-ops benchmark).
 - **CUDA graphs and torch.compile are mutually exclusive in this code.** Both want to own graph capture; trying to combine breaks. Use one or the other.
 - **Windows CPU `torch.compile` needs MSVC.** Install Visual Studio Build Tools' C++ workload, then run from a Developer Command Prompt (or `vcvars64.bat`-load the env). Linux/macOS work with their default `gcc`/`clang`.
 - **Inductor's auto-CUDA-graph (`reduce-overhead` mode) is disabled** in `fastqml.gate_fusion` (`torch._inductor.config.triton.cudagraphs = False`) to avoid fighting an outer `make_graphed_callables`. If you use Inductor's auto-graphs instead, comment that out.
