@@ -57,7 +57,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 Then install fastqml:
 
 ```bash
-pip install fastqml                  # once published to PyPI
+pip install fastqml
 # or directly from GitHub for the latest:
 pip install git+https://github.com/ereinha/fastQML.git
 ```
@@ -357,7 +357,7 @@ If you use fastQML in published research, please cite it:
   author  = {Reinhardt, Eric A. F.},
   title   = {{fastQML}: Fast {PyTorch} quantum-circuit primitives via {K}ronecker-product layer fusion},
   year    = {2026},
-  version = {0.1.0},
+  version = {0.2.1},
   url     = {https://github.com/ereinha/fastQML}
 }
 ```

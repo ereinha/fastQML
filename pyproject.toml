@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastqml"
-version = "0.2.0"
+version = "0.2.1"
 description = "Fast PyTorch quantum-circuit primitives via Kronecker-product layer fusion and edge coloring"
 readme = "README.md"
 license = { file = "LICENSE" }
