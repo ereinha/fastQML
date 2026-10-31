@@ -5,26 +5,33 @@ from fastqml import gate_fusion as gf
 
 
 class TinyVQC(nn.Module):
-    def __init__(self, n_qubits: int, n_layers: int, device, dtype):
+    def __init__(self, n_qubits: int, n_layers: int, device, dtype, fused: bool = True):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
+        self.fused = fused
 
         self.ry_angles = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.1)
         self.rz_angles = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.1)
         self.cry_angles = nn.Parameter(torch.randn(n_layers, n_qubits - 1) * 0.1)
 
-        cry_edges = [(q, q + 1) for q in range(n_qubits - 1)]
-        self.cry_plans = gf.compute_two_qubit_plans(
-            cry_edges, n_qubits, device, dtype, commute_fn=gf.cry_commute,
-        )
-        toff_triples = [(0, 1, 2)]
-        self.toff_plans = gf.compute_three_qubit_plans(
-            toff_triples, n_qubits, device, dtype, commute_fn=gf.toffoli_commute,
-        )
         toff_re, toff_im = gf.build_toffoli_8x8(1, device, dtype)
         self.register_buffer('toff_re', toff_re)
         self.register_buffer('toff_im', toff_im)
+
+        cry_edges = [(q, q + 1) for q in range(n_qubits - 1)]
+        if fused:
+            seq = ([(('su2', q), (q,)) for q in range(n_qubits)]
+                   + [(('cry', q), e) for q, e in enumerate(cry_edges)]
+                   + [('toff', (0, 1, 2))])
+            self.seq_plan = gf.compile_sequence(seq, n_qubits, device, dtype)
+        else:
+            self.cry_plans = gf.compute_two_qubit_plans(
+                cry_edges, n_qubits, device, dtype, commute_fn=gf.cry_commute,
+            )
+            self.toff_plans = gf.compute_three_qubit_plans(
+                [(0, 1, 2)], n_qubits, device, dtype, commute_fn=gf.toffoli_commute,
+            )
 
     def forward(self, amp: torch.Tensor) -> torch.Tensor:
         B = amp.shape[0]
@@ -34,6 +41,13 @@ class TinyVQC(nn.Module):
 
         for ll in range(self.n_layers):
             G_re, G_im = gf.build_ry_rz_gates(self.ry_angles[ll], self.rz_angles[ll])
+            if self.fused:
+                C_re, C_im = gf.build_cry_4x4(self.cry_angles[ll])
+                mats = {('su2', q): (G_re[q], G_im[q]) for q in range(nq)}
+                mats.update({('cry', q): (C_re[q], C_im[q]) for q in range(nq - 1)})
+                mats['toff'] = (self.toff_re[0], self.toff_im[0])
+                re, im = gf.apply_sequence(re, im, self.seq_plan, mats)
+                continue
             re, im = gf.apply_su2_layer(re, im, G_re, G_im)
             for plan in self.cry_plans:
                 cry_a = self.cry_angles[ll].index_select(0, plan['k_idx'])
@@ -47,7 +61,7 @@ class TinyVQC(nn.Module):
 
 def _make_inputs(n_qubits, B, device, dtype):
     amp = torch.rand(B, 1 << n_qubits, device=device, dtype=dtype)
-    amp = amp / amp.sum(dim=1, keepdim=True)
+    amp = amp / amp.norm(dim=1, keepdim=True)
     target = torch.rand_like(amp); target = target / target.sum(dim=1, keepdim=True)
     return amp, target
 
@@ -196,7 +210,7 @@ def benchmark_pennylane(n_qubits, n_layers, B, iters):
     rz = (torch.randn(n_layers, n_qubits) * 0.1).numpy()
     cry = (torch.randn(n_layers, n_qubits - 1) * 0.1).numpy()
     amps = torch.rand(B, 1 << n_qubits)
-    amps = (amps / amps.sum(dim=1, keepdim=True)).numpy()
+    amps = (amps / amps.norm(dim=1, keepdim=True)).numpy()
 
     dev = qml.device("lightning.qubit", wires=n_qubits)
 

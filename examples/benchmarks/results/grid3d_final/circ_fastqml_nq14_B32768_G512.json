@@ -1,0 +1,1 @@
+{"family": "circ", "fw": "fastqml", "nq": 14, "B": 32768, "G_target": 512, "L": 512, "G": 512, "skip": {"fwd": "OOM", "step": "OOM"}, "wall_s": 4.09800122724846e-06, "best": {"fwd": {"status": "OOM"}, "step": {"status": "OOM"}, "mem": {"status": "OOM"}, "bwd": {"status": "OOM"}}}

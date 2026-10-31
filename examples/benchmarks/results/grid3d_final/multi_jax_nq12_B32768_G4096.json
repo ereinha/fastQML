@@ -1,0 +1,1 @@
+{"family": "multi", "fw": "jax", "nq": 12, "B": 32768, "G_target": 4096, "L": 141, "G": 4089, "skip": {"fwd": "budget", "step": "OOM"}, "wall_s": 8.110000635497272e-07, "best": {"fwd": {"status": "budget"}, "step": {"status": "OOM"}, "mem": {"status": "OOM"}, "bwd": {"status": "OOM"}}}

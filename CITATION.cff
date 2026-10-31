@@ -6,8 +6,8 @@ authors:
     given-names: "Eric A. F."
     orcid: "https://orcid.org/0000-0003-2128-4025"
 title: "fastQML: Fast PyTorch quantum-circuit primitives via Kronecker-product layer fusion"
-version: "0.2.1"
-date-released: 2026-09-02
+version: "0.3.0"
+date-released: 2026-10-31
 url: "https://github.com/ereinha/fastQML"
 license: MIT
 keywords:

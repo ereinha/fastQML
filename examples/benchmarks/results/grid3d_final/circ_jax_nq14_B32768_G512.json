@@ -1,0 +1,1 @@
+{"family": "circ", "fw": "jax", "nq": 14, "B": 32768, "G_target": 512, "L": 512, "G": 512, "skip": {"fwd": "budget", "step": "OOM"}, "wall_s": 2.2940002963878214e-06, "best": {"fwd": {"status": "budget"}, "step": {"status": "OOM"}, "mem": {"status": "OOM"}, "bwd": {"status": "OOM"}}}

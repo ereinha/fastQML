@@ -224,6 +224,107 @@ def test_diagonal_packing_with_cphase():
     compare(f"5 overlapping CPhase ({len(plans)} colors via diag commute)", re_t, im_t, ref)
 
 
+def test_single_qubit_layer_chunked():
+    nq = 9
+    re0, im0 = make_random_state(nq, seed=7)
+    ry_angles = torch.randn(nq, device=DEVICE, dtype=DTYPE) * 1.5
+    rz_angles = torch.randn(nq, device=DEVICE, dtype=DTYPE) * 1.5
+
+    def ops():
+        ops_list = []
+        for q in range(nq):
+            ops_list.append(qml.RY(ry_angles[q].item(), wires=q))
+            ops_list.append(qml.RZ(rz_angles[q].item(), wires=q))
+        return ops_list
+    ref = run_pennylane(nq, ops, re0, im0)
+
+    G_re, G_im = gf.build_ry_rz_gates(ry_angles, rz_angles)
+    re_t, im_t = gf.apply_su2_layer(re0.clone(), im0.clone(), G_re, G_im)
+    n_win = len(gf._su2_windows(nq, gf.MAX_WINDOW))
+    compare(f"apply_su2_layer nq={nq} chunked ({n_win} windows)", re_t, im_t, ref)
+
+
+def test_windowed_color_with_long_span_pair():
+    nq = 9
+    re0, im0 = make_random_state(nq, seed=8)
+    edges = [(0, 1), (2, 3), (4, 5), (6, 7), (1, 8)]
+    angles = torch.randn(len(edges), device=DEVICE, dtype=DTYPE) * 1.5
+
+    plans = gf.compute_two_qubit_plans(edges, nq, DEVICE, DTYPE, commute_fn=gf.cry_commute)
+    re_t, im_t = re0.clone(), im0.clone()
+    for plan in plans:
+        a = angles.index_select(0, plan['k_idx'])
+        G_re, G_im = gf.build_cry_4x4(a)
+        re_t, im_t = gf.apply_disjoint_two_qubit_layer(re_t, im_t, plan, G_re, G_im)
+
+    def ops():
+        return [qml.CRY(angles[i].item(), wires=list(e)) for i, e in enumerate(edges)]
+    ref = run_pennylane(nq, ops, re0, im0)
+    n_win = sum(len(p['windows']) for p in plans)
+    n_long = sum(len(p['long']['windows']) for p in plans if 'long' in p)
+    compare(f"4 adjacent CRYs + CRY(1,8) ({n_win} windows, {n_long} via permute)", re_t, im_t, ref)
+
+
+def test_diagonal_builders():
+    nq = 6
+    re0, im0 = make_random_state(nq, seed=9)
+    th = torch.randn(nq, device=DEVICE, dtype=DTYPE) * 1.5
+    pairs = [(0, 1), (1, 2), (3, 5), (4, 0)]
+    ph = torch.randn(len(pairs), device=DEVICE, dtype=DTYPE) * 1.5
+
+    cases = [
+        ("build_rz_diag", gf.build_rz_diag(th, nq),
+         lambda: [qml.RZ(th[q].item(), wires=q) for q in range(nq)]),
+        ("build_phase_shift_diag", gf.build_phase_shift_diag(th, nq),
+         lambda: [qml.PhaseShift(th[q].item(), wires=q) for q in range(nq)]),
+        ("build_ising_zz_diag (4 overlapping pairs)", gf.build_ising_zz_diag(ph, pairs, nq),
+         lambda: [qml.IsingZZ(ph[i].item(), wires=list(p)) for i, p in enumerate(pairs)]),
+        ("build_cphase_diag (4 overlapping pairs)", gf.build_cphase_diag(ph, pairs, nq),
+         lambda: [qml.ControlledPhaseShift(ph[i].item(), wires=list(p)) for i, p in enumerate(pairs)]),
+        ("build_cz_diag (4 overlapping pairs)", gf.build_cz_diag(pairs, nq, DEVICE, DTYPE),
+         lambda: [qml.CZ(wires=list(p)) for p in pairs]),
+    ]
+    for name, (d_re, d_im), ops in cases:
+        re_t, im_t = gf.apply_diagonal_layer(re0.clone(), im0.clone(), d_re, d_im)
+        ref = run_pennylane(nq, ops, re0, im0)
+        compare(name, re_t, im_t, ref)
+
+
+def test_fused_sequence():
+    nq = 9
+    re0, im0 = make_random_state(nq, seed=11)
+    ry = torch.randn(nq, device=DEVICE, dtype=DTYPE) * 1.5
+    rz = torch.randn(nq, device=DEVICE, dtype=DTYPE) * 1.5
+    cry = torch.randn(nq - 1, device=DEVICE, dtype=DTYPE) * 1.5
+    crx = torch.randn(1, device=DEVICE, dtype=DTYPE) * 1.5
+
+    G_re, G_im = gf.build_ry_rz_gates(ry, rz)
+    C_re, C_im = gf.build_cry_4x4(cry)
+    T_re, T_im = gf.build_toffoli_8x8(1, DEVICE, DTYPE)
+    X_re, X_im = gf.build_crx_4x4(crx)
+    gates = ([(('su2', q), (q,)) for q in range(nq)] + [(('cry', q), (q, q + 1)) for q in range(nq - 1)]
+             + [('toff', (0, 1, 2)), ('crx', (0, nq - 1))])
+    mats = {('su2', q): (G_re[q], G_im[q]) for q in range(nq)}
+    mats.update({('cry', q): (C_re[q], C_im[q]) for q in range(nq - 1)})
+    mats['toff'] = (T_re[0], T_im[0])
+    mats['crx'] = (X_re[0], X_im[0])
+    plan = gf.compile_sequence(gates, nq, DEVICE, DTYPE)
+    re_t, im_t = gf.apply_sequence(re0.clone(), im0.clone(), plan, mats)
+
+    def ops():
+        ops_list = []
+        for q in range(nq):
+            ops_list.append(qml.RY(ry[q].item(), wires=q))
+            ops_list.append(qml.RZ(rz[q].item(), wires=q))
+        ops_list += [qml.CRY(cry[q].item(), wires=[q, q + 1]) for q in range(nq - 1)]
+        ops_list.append(qml.Toffoli(wires=[0, 1, 2]))
+        ops_list.append(qml.CRX(crx[0].item(), wires=[0, nq - 1]))
+        return ops_list
+    ref = run_pennylane(nq, ops, re0, im0)
+    compare(f"fused VQC layer + CRX(0,{nq - 1}) nq={nq} ({plan['n_windows']} windows, {plan['n_long']} long)",
+            re_t, im_t, ref)
+
+
 def test_toffoli_single():
     nq = 5
     re0, im0 = make_random_state(nq, seed=10)
@@ -336,6 +437,16 @@ if __name__ == "__main__":
     test_multi_pair_disjoint_color()
     test_chain_cry_multiple_colors()
     test_diagonal_packing_with_cphase()
+    print()
+    print("=== Windowed layers (nq > MAX_WINDOW) ===")
+    test_single_qubit_layer_chunked()
+    test_windowed_color_with_long_span_pair()
+    print()
+    print("=== Diagonal layers ===")
+    test_diagonal_builders()
+    print()
+    print("=== Time-fused sequences ===")
+    test_fused_sequence()
     print()
     print("=== 3-qubit gates (Toffoli, CSWAP) ===")
     test_toffoli_single()

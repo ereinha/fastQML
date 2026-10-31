@@ -1,0 +1,1 @@
+{"family": "vqc", "fw": "jax", "nq": 10, "B": 32768, "G_target": 32768, "L": 1092, "G": 32760, "skip": {"fwd": "budget", "step": "OOM"}, "wall_s": 7.809994713170454e-07, "best": {"fwd": {"status": "budget"}, "step": {"status": "OOM"}, "mem": {"status": "OOM"}, "bwd": {"status": "OOM"}}}
